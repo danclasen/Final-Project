@@ -1,0 +1,271 @@
+---
+title: "Final Exam Covid Data"
+author: "D. Clasen"
+date: "2026-08-17"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(lubridate)
+```
+ 
+## Overview and Question being asked
+ 
+This report pulls the daily COVID-19 time series data and builds a few visualizations and a simple linear model looking at the relationship between how widely a state was infected and how deadly the outbreak was there. I wanted to see the states that were the highest case and death rate as well as my own state of Arizona. 
+ 
+## Importing the Data
+ 
+```{r import_data}
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/csse_covid_19_time_series/"
+ 
+file_names <- c("time_series_covid19_confirmed_US.csv",
+                 "time_series_covid19_confirmed_global.csv",
+                 "time_series_covid19_deaths_US.csv",
+                 "time_series_covid19_deaths_global.csv")
+ 
+urls <- str_c(url_in, file_names)
+ 
+us_cases      <- read_csv(urls[1])
+global_cases  <- read_csv(urls[2])
+us_deaths     <- read_csv(urls[3])
+global_deaths <- read_csv(urls[4])
+```
+ 
+## Tidying the Global Data
+ 
+Each global file has one row per country and a separate column for every date. The block below pivots those date columns into a single `date` column with a `cases`/`deaths` value column, drops `Lat`/`Long`joins the cases and deaths tables together, converts `date` from text to an actual date, and renames the `Province/State` and `Country/Region` columns to underscore-separated names. 
+ 
+```{r tidy_global}
+global_cases <- global_cases %>%
+  pivot_longer(cols = -c(`Province/State`, `Country/Region`, Lat, Long),
+               names_to = "date", values_to = "cases") %>%
+  select(-c(Lat, Long))
+ 
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = -c(`Province/State`, `Country/Region`, Lat, Long),
+               names_to = "date", values_to = "deaths") %>%
+  select(-c(Lat, Long))
+ 
+global <- global_cases %>%
+  full_join(global_deaths,
+            by = c("Province/State", "Country/Region", "date")) %>%
+  rename(Country_Region = `Country/Region`,
+         Province_State = `Province/State`) %>%
+  mutate(date = mdy(date)) %>%
+  filter(cases > 0)
+```
+ 
+## Adding Population Data to the Global Data
+ 
+The time series files don't include population, so this brings it in. It also combines the state or province with the country in its own column.
+ 
+```{r global_population}
+global <- global %>%
+  unite("Combined_Key", c(Province_State, Country_Region),
+        sep = ", ", na.rm = TRUE, remove = FALSE)
+ 
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+ 
+uid <- read_csv(uid_lookup_url, show_col_types = FALSE) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+ 
+global <- global %>%
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths,
+         Population, Combined_Key)
+```
+ 
+## Tidying the US Data
+ 
+The US files had many unneeded rows and columns. This code cleans them up
+ 
+```{r tidy_us}
+us_cases <- us_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = "date", values_to = "cases") %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+ 
+us_deaths <- us_deaths %>%
+  pivot_longer(cols = -(UID:Population),
+               names_to = "date", values_to = "deaths") %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+ 
+us <- us_cases %>%
+  full_join(us_deaths,
+            by = c("Admin2", "Province_State", "Country_Region",
+                    "Combined_Key", "date"))
+```
+ 
+## Aggregating to State and National Level
+ 
+Next one gives one row per state and cleans up the totalsa
+ 
+```{r aggregate_us}
+us_by_state <- us %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population), .groups = "drop") %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  select(Province_State, Country_Region, date,
+         cases, deaths, deaths_per_mill, Population)
+ 
+us_totals <- us_by_state %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population), .groups = "drop") %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  select(Country_Region, date, cases, deaths, deaths_per_mill, Population)
+```
+ 
+## Visualization 1: Cumulative Cases and Deaths in the US
+ 
+This plot shows the running total of confirmed cases and deaths for the country over time.
+ 
+```{r plot_us_totals}
+us_totals %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y = NULL)
+```
+ 
+## Visualization 2: Cumulative Cases and Deaths for a Single State
+ 
+Same idea as above, but filtered down to just Arizona 
+
+```{r plot_state_totals}
+state <- "Arizona"
+ 
+us_by_state %>%
+  filter(Province_State == state, cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", state), y = NULL)
+```
+ 
+## Daily New Cases and Deaths
+ 
+The columns built so far are cumulative totals,which are useful for seeing overall scale but this next code allows to see the change day to day. 
+ 
+```{r new_cases}
+us_by_state <- us_by_state %>%
+  group_by(Province_State) %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths)) %>%
+  ungroup()
+ 
+us_totals <- us_totals %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+```
+ 
+## Visualization 3: Daily New Cases and Deaths
+ 
+Same log-scale line/point pattern as before, but now showing the daily change rather than the running total.When seeing this you can see that the values begin to decrease as the dates continue forward and historically this makes sense as there was more of a handle on vaccines and quarantine practices. Also you can see just how much more spread out it is in the newer dates compared to the height of Covid in 2020/2021.
+ 
+```{r plot_new_cases}
+us_totals %>%
+  filter(new_cases > 0) %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y = NULL)
+ 
+us_by_state %>%
+  filter(Province_State == state, new_cases > 0) %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", state), y = NULL)
+```
+ 
+## State-Level Summary: Rates per Thousand Residents
+ 
+This collapses each state down to a single row with its maximum values and makes them in rate per thousand. 
+ 
+```{r state_totals}
+us_state_totals <- us_by_state %>%
+  group_by(Province_State) %>%
+  summarize(deaths = max(deaths), cases = max(cases),
+            population = max(Population),
+            cases_per_thou = 1000 * cases / population,
+            deaths_per_thou = 1000 * deaths / population) %>%
+  filter(cases > 0, population > 0)
+```
+ 
+## Exploring the Best and Worst States by Death Rate
+ 
+A quick look at which states had the lowest and highest
+deaths per thousand.When looking at this you can see that Arizona had the highest rate be thousand and American Samoa had the least. 
+ 
+```{r explore_state_totals}
+us_state_totals %>%
+  slice_min(deaths_per_thou, n = 10) %>%
+  select(deaths_per_thou, cases_per_thou, everything())
+ 
+us_state_totals %>%
+  slice_max(deaths_per_thou, n = 10) %>%
+  select(deaths_per_thou, cases_per_thou, everything())
+```
+ 
+## Linear Model: Deaths per Thousand vs. Cases per Thousand
+ 
+This model asks a simple question: across states, does a higher case rate predict a higher death rate? 
+
+
+```{r model}
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = us_state_totals)
+summary(mod)
+```
+ 
+## Visualization 4: Actual vs. Predicted Deaths per Thousand
+ 
+This plots each state's actual death rate (blue) against the death rate the model predicts from its case rate alone (red). Where the red and blue points for a state are far apart, that state's actual outcome deviated a lot from what its case rate alone would suggest. 
+
+```{r plot_model}
+us_tot_w_pred <- us_state_totals %>%
+  mutate(pred = predict(mod))
+ 
+us_tot_w_pred %>%
+  ggplot() +
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+```
+
+## Bias
+
+There is bias in the variables we have chosen and how we even cleaned the data. It is important to see that we are decding all of the variables and what we are actually looking at in each visualization. This was all set up as our own choice to what we wanted to look at. These numbers are also a little outdated because the newest date was in 2023. This means that there are 3 years of missing data. 
+
+## Conclusion
+
+Overall the information was a good representation of the peak times of covid and gave a good understanding of the states with the highest cases and death rates. I enjoyed looking at Arizona especially because it allowed me to see where I live and the information associated with it. 
